@@ -1,14 +1,9 @@
 """Study plan generator using Anthropic tool calling."""
 import json
-from anthropic import Anthropic
-from dotenv import load_dotenv
 
-from llm import MODEL
+from llm import configure, get_client
 from rag import extract_topic_outline
-from stats import load_stats, DIFFICULTIES
-
-load_dotenv()
-_client = Anthropic()
+from stats import load_stats
 
 
 # --- Tool definitions exposed to the LLM ---
@@ -74,7 +69,8 @@ def _tool_get_performance_summary() -> dict:
 
 
 def _tool_get_weak_topics(threshold: float) -> dict:
-    threshold = float(threshold)
+    if type(threshold) not in (int, float) or not 0 <= threshold <= 1:
+        raise ValueError("threshold must be a number between zero and one.")
     summary = _tool_get_performance_summary()
     weak = {
         name: info
@@ -89,10 +85,17 @@ def _tool_get_notes_outline(notes_text: str) -> list[str]:
 
 
 def _dispatch_tool(name: str, args: dict, notes_text: str):
+    if not isinstance(args, dict):
+        raise ValueError("Tool arguments must be an object.")
+    allowed = {"threshold"} if name == "get_weak_topics" else set()
+    if set(args) - allowed:
+        raise ValueError("Unexpected tool arguments.")
     if name == "get_performance_summary":
         return _tool_get_performance_summary()
     if name == "get_weak_topics":
-        return _tool_get_weak_topics(args.get("threshold", 0.5))
+        if "threshold" not in args:
+            raise ValueError("threshold is required.")
+        return _tool_get_weak_topics(args["threshold"])
     if name == "get_notes_outline":
         return _tool_get_notes_outline(notes_text)
     raise ValueError(f"Unknown tool: {name}")
@@ -132,6 +135,10 @@ Notes:
 
 def generate_study_plan(notes_text: str, max_iterations: int = 6) -> str:
     """Run the tool-call loop and return the final plan text."""
+    if type(max_iterations) is not int or max_iterations < 1:
+        raise ValueError("max_iterations must be a positive integer.")
+    if not extract_topic_outline(notes_text):
+        raise ValueError("Add numbered topic headings to your notes before requesting a study plan.")
     messages: list[dict] = [
         {
             "role": "user",
@@ -139,9 +146,10 @@ def generate_study_plan(notes_text: str, max_iterations: int = 6) -> str:
         }
     ]
 
+    completed_tools = set()
     for _ in range(max_iterations):
-        resp = _client.messages.create(
-            model=MODEL,
+        resp = get_client().messages.create(
+            model=configure(),
             max_tokens=2048,
             system=PLANNER_SYSTEM,
             tools=TOOL_DEFS,
@@ -152,33 +160,43 @@ def generate_study_plan(notes_text: str, max_iterations: int = 6) -> str:
         messages.append({"role": "assistant", "content": resp.content})
 
         if resp.stop_reason == "end_turn":
+            if "get_notes_outline" not in completed_tools or not completed_tools.intersection({"get_performance_summary", "get_weak_topics"}):
+                messages.append({"role": "user", "content": "Before returning a plan, call get_notes_outline and a performance tool successfully. Do not guess this data."})
+                continue
             # Final answer — concatenate any text blocks.
             text_parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
-            return "\n".join(text_parts).strip() or "(planner returned no text)"
+            text = "\n".join(text_parts).strip()
+            if not text:
+                raise ValueError("Planner returned no text.")
+            return text
 
         if resp.stop_reason == "tool_use":
             tool_results = []
             for block in resp.content:
                 if getattr(block, "type", None) == "tool_use":
                     name = block.name
-                    args = block.input or {}
+                    args = block.input
+                    is_error = False
                     try:
                         result = _dispatch_tool(name, args, notes_text)
                         result_str = json.dumps(result)
+                        completed_tools.add(name)
                     except Exception as e:
                         result_str = json.dumps({"error": str(e)})
+                        is_error = True
                     tool_results.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
                             "content": result_str,
+                            "is_error": is_error,
                         }
                     )
+            if not tool_results:
+                raise ValueError("Planner requested tool use without providing any tool calls.")
             messages.append({"role": "user", "content": tool_results})
             continue
 
-        # Unexpected stop reason — return whatever text we have.
-        text_parts = [b.text for b in resp.content if getattr(b, "type", None) == "text"]
-        return "\n".join(text_parts).strip() or f"(planner stopped: {resp.stop_reason})"
+        raise ValueError(f"Planner response was incomplete ({resp.stop_reason}).")
 
-    return "(planner exceeded max iterations without producing a plan)"
+    raise ValueError("Planner exceeded its tool-call limit without producing a grounded plan.")

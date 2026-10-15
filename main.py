@@ -3,10 +3,68 @@ import argparse
 import sys
 from pathlib import Path
 
+from llm import configure
 from rag import NotesIndex, extract_topic_outline
-from quiz import generate_mcqs, run_quiz, generate_open_questions, run_open_quiz, generate_mcqs_for_topic
+from quiz import run_quiz, generate_open_questions, run_open_quiz, generate_mcqs_for_topic
 from stats import record_results, get_difficulty, format_stats_report
 from planner import generate_study_plan
+
+COMMANDS = "Commands: /quiz  /quiz open  /plan  /stats  /topics  /help  /exit"
+
+
+def handle_command(cmd: str, index: NotesIndex, notes_text: str, topics: list[str]) -> bool:
+    """Handle one command. Return false when the user wants to leave."""
+    if cmd in ("/exit", "/quit"):
+        return False
+    if not cmd:
+        return True
+    if cmd == "/help":
+        print(COMMANDS)
+    elif cmd == "/plan":
+        print("Generating a study plan...")
+        print(generate_study_plan(notes_text))
+    elif cmd == "/quiz open":
+        questions = generate_open_questions(index, n=3)
+        if len(questions) < 3:
+            print(f"{len(questions)} questions passed validation; using those only.")
+        scores = run_open_quiz(questions)
+        if scores:
+            print(f"\nTotal: {sum(scores)}/{len(scores) * 10} across {len(scores)} graded answers.")
+        else:
+            print("No answers were graded.")
+    elif cmd == "/topics":
+        for i, topic in enumerate(topics, 1):
+            print(f"  {i}. {topic}  [{get_difficulty(topic)}]")
+    elif cmd == "/stats":
+        print(format_stats_report())
+    elif cmd == "/quiz":
+        print("Pick a topic:")
+        for i, topic in enumerate(topics, 1):
+            print(f"  {i}. {topic}  [{get_difficulty(topic)}]")
+        try:
+            idx = int(input("Topic number: ").strip()) - 1
+        except ValueError:
+            print("Invalid topic number.")
+            return True
+        if not 0 <= idx < len(topics):
+            print("Invalid topic number.")
+            return True
+        topic = topics[idx]
+        difficulty = get_difficulty(topic)
+        print(f"Generating {difficulty} quiz on '{topic}'...")
+        questions = generate_mcqs_for_topic(index, topic, difficulty, n=5)
+        if len(questions) < 5:
+            print(f"{len(questions)} questions passed validation; using those only.")
+        scores = run_quiz(questions)
+        if scores:
+            updated = record_results(topic, scores)
+            print(f"\nYou scored {int(sum(scores))}/{len(scores)}")
+            print(f"Topic difficulty is now: {updated['difficulty']}")
+        else:
+            print("No completed answers; performance history is unchanged.")
+    else:
+        print(f"Unknown command: {cmd}. Type /help.")
+    return True
 
 
 def main() -> int:
@@ -15,19 +73,22 @@ def main() -> int:
     args = parser.parse_args()
 
     notes_path = Path(args.notes)
-    if not notes_path.exists():
-        print(f"Error: notes file not found: {notes_path}", file=sys.stderr)
+    try:
+        text = notes_path.read_text(encoding="utf-8")
+        if not text.strip():
+            raise ValueError("The notes file is empty.")
+        configure()
+        print(f"Loading notes from {notes_path}...")
+        print("Building index (embedding chunks)...")
+        index = NotesIndex.build(text)
+    except (OSError, UnicodeError, ValueError, RuntimeError, ImportError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
-
-    print(f"Loading notes from {notes_path}...")
-    text = notes_path.read_text(encoding="utf-8")
-    print("Building index (embedding chunks)...")
-    index = NotesIndex.build(text)
     topics = extract_topic_outline(text)
     if not topics:
-        print("Warning: could not extract topic outline. Falling back to single 'General' topic.")
+        print("No numbered headings found. Quizzes use 'General'; /plan requires numbered topics.")
         topics = ["General"]
-    print(f"Indexed {len(index.chunks)} chunks across {len(topics)} topics. Type /quiz, /quiz open, /plan, /stats, /topics, /help, /exit.")
+    print(f"Indexed {len(index.chunks)} chunks across {len(topics)} topics. {COMMANDS}")
 
     while True:
         try:
@@ -35,69 +96,13 @@ def main() -> int:
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
-        if not cmd:
-            continue
-        if cmd in ("/exit", "/quit"):
-            return 0
-        if cmd == "/help":
-            print("Commands: /quiz  /quiz open  /plan  /stats  /topics  /help  /exit")
-            continue
-        if cmd == "/plan":
-            print("Generating personalized study plan (this may take ~10-20 seconds)...")
-            try:
-                plan = generate_study_plan(text)
-            except Exception as e:
-                print(f"Error generating plan: {e}")
-                continue
-            print()
-            print(plan)
-            continue
-        if cmd == "/quiz open":
-            try:
-                qs = generate_open_questions(index, n=3)
-            except Exception as e:
-                print(f"Error generating open quiz: {e}")
-                continue
-            total = run_open_quiz(qs)
-            print(f"\nTotal: {total}/{len(qs) * 10}")
-            continue
-        if cmd == "/topics":
-            for i, t in enumerate(topics, 1):
-                diff = get_difficulty(t)
-                print(f"  {i}. {t}  [{diff}]")
-            continue
-        if cmd == "/stats":
-            print(format_stats_report())
-            continue
-        if cmd == "/quiz":
-            print("Pick a topic:")
-            for i, t in enumerate(topics, 1):
-                diff = get_difficulty(t)
-                print(f"  {i}. {t}  [{diff}]")
-            try:
-                choice = input("Topic number: ").strip()
-                idx = int(choice) - 1
-                if not (0 <= idx < len(topics)):
-                    print("Invalid topic number.")
-                    continue
-            except (ValueError, EOFError, KeyboardInterrupt):
-                print("\nCancelled.")
-                continue
-            topic = topics[idx]
-            difficulty = get_difficulty(topic)
-            print(f"Generating {difficulty} quiz on '{topic}'...")
-            try:
-                qs = generate_mcqs_for_topic(index, topic, difficulty, n=5)
-            except Exception as e:
-                print(f"Error generating quiz: {e}")
-                continue
-            score = run_quiz(qs)
-            print(f"\nYou scored {score}/{len(qs)}")
-            per_q = [1.0] * score + [0.0] * (len(qs) - score)
-            updated = record_results(topic, per_q)
-            print(f"Topic difficulty is now: {updated['difficulty']}")
-            continue
-        print(f"Unknown command: {cmd}. Type /help.")
+        try:
+            if not handle_command(cmd, index, text, topics):
+                return 0
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
+        except Exception as exc:
+            print(f"Could not complete that command: {exc}")
 
 
 if __name__ == "__main__":

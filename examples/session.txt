@@ -1,0 +1,33 @@
+Offline example — hand-authored questions, not a live model response.
+The quiz runner and history update use the same code as the live CLI.
+
+
+Q1. What does each supervised training example include?
+  A) Only an unlabeled input
+  B) A random prediction
+  C) An input and its known output
+  D) A model architecture
+Your answer (A/B/C/D): C
+✓ Correct. The notes describe supervised training data as input-output pairs.
+
+Q2. Which task predicts a continuous number?
+  A) Classification
+  B) Regression
+  C) Clustering
+  D) Labeling
+Your answer (A/B/C/D): A
+✗ Wrong. Correct answer: B. Regression predicts numerical values, such as a house price.
+
+Q3. How does an overfit model perform on new data?
+  A) It always improves
+  B) It always predicts zero
+  C) Poorly compared with its training performance
+  D) Exactly as on training data
+Your answer (A/B/C/D): C
+✓ Correct. The notes describe overfitting as memorizing training examples instead of learning general patterns.
+
+Score: 2/3
+Answer order: [1.0, 0.0, 1.0]
+Next difficulty: easy
+
+No API calls or model downloads. Your performance.json was not changed.

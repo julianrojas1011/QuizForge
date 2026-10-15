@@ -37,7 +37,55 @@ def _strip_fences(s: str) -> str:
     return s.strip()
 
 
+def _question_list(raw: str) -> list[dict]:
+    data = json.loads(_strip_fences(raw))
+    if not isinstance(data, dict) or not isinstance(data.get("questions"), list):
+        raise ValueError("Model output must contain a questions list.")
+    return data["questions"]
+
+
+def _nonempty_text(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_mcq(question) -> bool:
+    if not isinstance(question, dict):
+        return False
+    options = question.get("options")
+    return (
+        _nonempty_text(question.get("question"))
+        and isinstance(options, dict)
+        and set(options) == {"A", "B", "C", "D"}
+        and all(_nonempty_text(option) for option in options.values())
+        and len({option.strip().casefold() for option in options.values()}) == 4
+        and isinstance(question.get("answer"), str)
+        and question["answer"] in options
+        and _nonempty_text(question.get("explanation"))
+    )
+
+
+def _validate_count(n: int) -> None:
+    if type(n) is not int or not 1 <= n <= 20:
+        raise ValueError("Request between 1 and 20 questions.")
+
+
+def _take_valid(questions: list[dict], n: int) -> list[dict]:
+    """Keep the model's order and remove duplicates without filling from rejects."""
+    selected, seen = [], set()
+    for question in questions:
+        key = " ".join(question["question"].casefold().split())
+        if key not in seen:
+            selected.append(question)
+            seen.add(key)
+        if len(selected) == n:
+            break
+    if not selected:
+        raise ValueError("No questions passed validation. Try generating the quiz again.")
+    return selected
+
+
 def generate_mcqs(index: NotesIndex, n: int = 5) -> list[dict]:
+    _validate_count(n)
     seed_queries = [
         "core definitions and key concepts",
         "differences between approaches",
@@ -55,37 +103,41 @@ def generate_mcqs(index: NotesIndex, n: int = 5) -> list[dict]:
         if len(passages) >= 6:
             break
 
+    if not passages:
+        raise ValueError("No passages found in the notes.")
     joined = "\n\n---\n\n".join(f"PASSAGE {i+1}:\n{p}" for i, p in enumerate(passages))
     user_msg = (
         f"Generate exactly {n} multiple-choice questions grounded in the following passages.\n\n"
         f"{joined}\n\nReturn JSON only."
     )
-    raw = _strip_fences(complete(QUIZ_SYSTEM, user_msg, max_tokens=3000))
-    data = json.loads(raw)
-    qs = data["questions"][:n]
-    if len(qs) < n:
-        raise ValueError(f"LLM returned {len(qs)} questions, expected {n}")
-    return qs
+    questions = _question_list(complete(QUIZ_SYSTEM, user_msg, max_tokens=3000))
+    return _take_valid([q for q in questions if _valid_mcq(q)], n)
 
 
-def run_quiz(questions: list[dict]) -> int:
-    score = 0
+def run_quiz(questions: list[dict]) -> list[float]:
+    """Return completed scores in answer order, including on cancellation."""
+    scores = []
     for i, q in enumerate(questions, 1):
         print(f"\nQ{i}. {q['question']}")
         for letter in ("A", "B", "C", "D"):
             print(f"  {letter}) {q['options'][letter]}")
         while True:
-            ans = input("Your answer (A/B/C/D): ").strip().upper()
+            try:
+                ans = input("Your answer (A/B/C/D): ").strip().upper()
+            except (EOFError, KeyboardInterrupt):
+                print("\nQuiz stopped. Keeping completed answers only.")
+                return scores
             if ans in ("A", "B", "C", "D"):
                 break
             print("  Please type A, B, C, or D.")
         correct = q["answer"]
         if ans == correct:
             print(f"✓ Correct. {q.get('explanation', '')}")
-            score += 1
+            scores.append(1.0)
         else:
             print(f"✗ Wrong. Correct answer: {correct}. {q.get('explanation', '')}")
-    return score
+            scores.append(0.0)
+    return scores
 
 
 # ----- Milestone 2: open-ended questions -----
@@ -139,6 +191,7 @@ Output ONLY valid JSON, no prose, no markdown fences:
 
 def generate_open_questions(index: NotesIndex, n: int = 3) -> list[dict]:
     """Generate n open-ended questions, each with its source passage."""
+    _validate_count(n)
     seed_queries = [
         "core definitions",
         "trade-offs and comparisons",
@@ -156,18 +209,22 @@ def generate_open_questions(index: NotesIndex, n: int = 3) -> list[dict]:
         if len(passages) >= 5:
             break
 
+    if not passages:
+        raise ValueError("No passages found in the notes.")
     joined = "\n\n---\n\n".join(f"PASSAGE {i+1}:\n{p}" for i, p in enumerate(passages))
     user_msg = (
         f"Generate exactly {n} open-ended questions grounded in these passages. "
         f"For each, copy the answering passage verbatim into 'source_passage'.\n\n"
         f"{joined}\n\nReturn JSON only."
     )
-    raw = _strip_fences(complete(OPEN_GEN_SYSTEM, user_msg, max_tokens=2000))
-    data = json.loads(raw)
-    qs = data["questions"][:n]
-    if len(qs) < n:
-        raise ValueError(f"LLM returned {len(qs)} questions, expected {n}")
-    return qs
+    questions = _question_list(complete(OPEN_GEN_SYSTEM, user_msg, max_tokens=2000))
+    sources = {passage.strip() for passage in passages}
+    valid = [
+        q for q in questions
+        if isinstance(q, dict) and _nonempty_text(q.get("question"))
+        and _nonempty_text(q.get("source_passage")) and q["source_passage"].strip() in sources
+    ]
+    return _take_valid(valid, n)
 
 
 def grade_open_answer(question: str, source_passage: str, student_answer: str) -> dict:
@@ -180,31 +237,38 @@ def grade_open_answer(question: str, source_passage: str, student_answer: str) -
     )
     raw = _strip_fences(complete(OPEN_GRADE_SYSTEM, user_msg, max_tokens=400))
     data = json.loads(raw)
-    score = int(data["score"])
-    score = max(0, min(10, score))
-    return {"score": score, "feedback": data.get("feedback", "")}
+    if not isinstance(data, dict) or type(data.get("score")) is not int or not 0 <= data["score"] <= 10:
+        raise ValueError("The grader must return an integer score from zero to ten.")
+    if not _nonempty_text(data.get("feedback")):
+        raise ValueError("The grader returned no feedback.")
+    return {"score": data["score"], "feedback": data["feedback"]}
 
 
-def run_open_quiz(questions: list[dict]) -> int:
-    """Ask each open question, grade it, print feedback + source. Return total score."""
-    total = 0
+def run_open_quiz(questions: list[dict]) -> list[int]:
+    """Return completed grades only; failed grading is not an incorrect answer."""
+    scores = []
     for i, q in enumerate(questions, 1):
         print(f"\nQ{i}. {q['question']}")
         try:
             answer = input("Your answer: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return total
+            return scores
         if not answer:
             print("(empty answer — scored 0)")
             print(f"Source passage:\n  {q['source_passage']}")
+            scores.append(0)
             continue
-        result = grade_open_answer(q["question"], q["source_passage"], answer)
-        total += result["score"]
+        try:
+            result = grade_open_answer(q["question"], q["source_passage"], answer)
+        except Exception as exc:
+            print(f"Could not grade this answer: {exc}. No score recorded.")
+            continue
+        scores.append(result["score"])
         print(f"Score: {result['score']}/10")
         print(f"Feedback: {result['feedback']}")
         print(f"Source passage:\n  {q['source_passage']}")
-    return total
+    return scores
 
 
 # ----- Milestone 3: difficulty-aware MCQs scoped to a topic -----
@@ -250,13 +314,11 @@ The "claimed_difficulty" field is REQUIRED. Set it to the difficulty you actuall
 
 def _is_difficulty_consistent(question: dict, requested: str) -> bool:
     """Cheap heuristic check + claimed_difficulty match."""
-    claimed = (question.get("claimed_difficulty") or "").strip().lower()
-    if claimed and claimed != requested:
+    if question.get("claimed_difficulty") != requested:
         return False
     q_text = question.get("question", "").lower()
     # Heuristic: hard questions usually contain scenario/application cues.
     hard_cues = ("suppose", "imagine", "scenario", "would happen", "predict", "apply", "given that", "if a ")
-    easy_cues = ("what is", "which of the following is the definition", "what does", "who")
     if requested == "hard":
         # Reject obviously-easy phrasings flagged as hard.
         if any(q_text.startswith(c) for c in ("what is ", "what does ")) and "?" in q_text and len(q_text) < 80:
@@ -274,6 +336,9 @@ def generate_mcqs_for_topic(
     n: int = 5,
 ) -> list[dict]:
     """Retrieve passages relevant to topic, generate n MCQs at the given difficulty."""
+    _validate_count(n)
+    if not _nonempty_text(topic):
+        raise ValueError("A non-empty topic is required.")
     if difficulty not in DIFFICULTY_INSTRUCTIONS:
         raise ValueError(f"Unknown difficulty: {difficulty}")
 
@@ -298,15 +363,6 @@ def generate_mcqs_for_topic(
         f"PASSAGES:\n{joined}\n\n"
         f"Generate exactly {n} MCQs at the {difficulty} level. Return JSON only."
     )
-    raw = _strip_fences(complete(QUIZ_TOPIC_SYSTEM, user_msg, max_tokens=3000))
-    data = json.loads(raw)
-    qs = data["questions"][:n]
-
-    # Filter out questions that fail the consistency check, then top up if short.
-    filtered = [q for q in qs if _is_difficulty_consistent(q, difficulty)]
-    # If too many were filtered, keep what we have plus the rejected ones to reach n.
-    if len(filtered) < n:
-        for q in qs:
-            if q not in filtered and len(filtered) < n:
-                filtered.append(q)
-    return filtered[:n]
+    questions = _question_list(complete(QUIZ_TOPIC_SYSTEM, user_msg, max_tokens=3000))
+    filtered = [q for q in questions if _valid_mcq(q) and _is_difficulty_consistent(q, difficulty)]
+    return _take_valid(filtered, n)

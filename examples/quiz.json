@@ -1,0 +1,24 @@
+{
+  "note": "Hand-authored fixture based on ml_basics.txt. This is not a saved model response.",
+  "topic": "Supervised Learning",
+  "questions": [
+    {
+      "question": "What does each supervised training example include?",
+      "options": {"A": "Only an unlabeled input", "B": "A random prediction", "C": "An input and its known output", "D": "A model architecture"},
+      "answer": "C",
+      "explanation": "The notes describe supervised training data as input-output pairs."
+    },
+    {
+      "question": "Which task predicts a continuous number?",
+      "options": {"A": "Classification", "B": "Regression", "C": "Clustering", "D": "Labeling"},
+      "answer": "B",
+      "explanation": "Regression predicts numerical values, such as a house price."
+    },
+    {
+      "question": "How does an overfit model perform on new data?",
+      "options": {"A": "It always improves", "B": "It always predicts zero", "C": "Poorly compared with its training performance", "D": "Exactly as on training data"},
+      "answer": "C",
+      "explanation": "The notes describe overfitting as memorizing training examples instead of learning general patterns."
+    }
+  ]
+}

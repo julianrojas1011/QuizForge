@@ -1,5 +1,8 @@
 """Per-topic performance tracking with persistence to performance.json."""
 import json
+import math
+import os
+import tempfile
 from pathlib import Path
 
 STATS_PATH = Path("performance.json")
@@ -22,16 +25,47 @@ def load_stats() -> dict:
     try:
         with STATS_PATH.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        if "topics" not in data or not isinstance(data["topics"], dict):
-            return {"topics": {}}
+        if not isinstance(data, dict) or not isinstance(data.get("topics"), dict):
+            raise ValueError("Expected an object containing a topics object.")
+        for name, topic in data["topics"].items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(topic, dict):
+                raise ValueError("Invalid topic record.")
+            attempts, correct = topic.get("attempts"), topic.get("correct")
+            history = topic.get("history")
+            if type(attempts) is not int or attempts < 0:
+                raise ValueError("Attempts must be a non-negative integer.")
+            if not _finite_number(correct) or not 0 <= correct <= attempts:
+                raise ValueError("Correct count must be between zero and attempts.")
+            if topic.get("difficulty") not in DIFFICULTIES:
+                raise ValueError("Unknown saved difficulty.")
+            if not isinstance(history, list) or len(history) > min(50, attempts):
+                raise ValueError("Invalid score history.")
+            if any(not _finite_number(score) or not 0 <= score <= 1 for score in history):
+                raise ValueError("History scores must be finite numbers between zero and one.")
+            if sum(history) > correct + 1e-9:
+                raise ValueError("History does not match the correct count.")
         return data
-    except (json.JSONDecodeError, OSError):
-        return {"topics": {}}
+    except (ValueError, OSError) as exc:
+        raise ValueError(f"Cannot read {STATS_PATH}: {exc} Back up and repair or rename this file; it has not been overwritten.") from exc
+
+
+def _finite_number(value) -> bool:
+    return type(value) is int or (type(value) is float and math.isfinite(value))
 
 
 def save_stats(data: dict) -> None:
-    with STATS_PATH.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    """Replace only after the new record has been fully written."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=STATS_PATH.parent, delete=False) as f:
+            temporary = Path(f.name)
+            json.dump(data, f, indent=2, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, STATS_PATH)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _bump(difficulty: str, direction: int) -> str:
@@ -47,6 +81,10 @@ def record_results(topic: str, per_question_scores: list[float]) -> dict:
     per_question_scores: list of floats in [0,1]. For MCQ: 0 or 1. For open: score/10.
     Returns updated topic dict (already saved).
     """
+    if not isinstance(topic, str) or not topic.strip():
+        raise ValueError("A non-empty topic is required.")
+    if not per_question_scores or any(not _finite_number(score) or not 0 <= score <= 1 for score in per_question_scores):
+        raise ValueError("Provide at least one score, with each score between zero and one.")
     data = load_stats()
     t = data["topics"].get(topic) or _empty_topic()
 
@@ -57,11 +95,11 @@ def record_results(topic: str, per_question_scores: list[float]) -> dict:
     t["correct"] += sum(per_question_scores)
 
     # Adapt difficulty based on rolling avg over recent history
-    recent = t["history"][-10:] if len(t["history"]) >= 3 else t["history"]
+    recent = t["history"][-10:]
     avg = sum(recent) / len(recent) if recent else 0.0
-    if avg > 0.70:
+    if len(recent) >= 3 and avg > 0.70:
         t["difficulty"] = _bump(t["difficulty"], +1)
-    elif avg < 0.40:
+    elif len(recent) >= 3 and avg < 0.40:
         t["difficulty"] = _bump(t["difficulty"], -1)
     # else stay
 
