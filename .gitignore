@@ -7,3 +7,6 @@ performance.json
 .DS_Store
 .idea/
 .vscode/
+
+# Local development-tool settings
+.claude/
