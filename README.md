@@ -36,7 +36,8 @@ Use **Python 3.11 or 3.12** and an Anthropic API key. The first live run downloa
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
